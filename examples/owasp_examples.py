@@ -39,7 +39,7 @@ def get_user_profile():
 # Rotating these credentials requires a code change and redeployment.
 # ----------------------------------------------------------------
 DB_PASSWORD = "SuperSecret123!"          # hardcoded database password
-STRIPE_API_KEY = "sk_live_4eC39HqLyjWDarjtT1zdp7dc"   # hardcoded API key
+STRIPE_API_KEY = "sk_live_FAKE_KEY_FOR_TESTING_ONLY"  # hardcoded API key   # hardcoded API key
 
 def connect_to_database():
     # Credential is visible in plaintext — should come from os.environ
