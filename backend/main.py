@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import os
 import json
 from pathlib import Path
+from backend.database import init_db, save_scan, get_recent_scans
 
 load_dotenv()
 
@@ -15,6 +16,8 @@ client = AzureOpenAI(
 )
 
 app = FastAPI()
+
+init_db()
 
 # Resolve path relative to this file so it works regardless of cwd
 RULES_PATH = Path(__file__).parent.parent / "rules" / "owasp_rules.json"
@@ -94,6 +97,15 @@ class ScanResult(BaseModel):
     summary: str
 
 
+class ScanRecord(BaseModel):
+    id: int
+    timestamp: str
+    code_snippet: str
+    vulnerabilities_found: list[dict]
+    fixed_code: str
+    summary: str
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 class CodeInput(BaseModel):
@@ -103,6 +115,11 @@ class CodeInput(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Hello from Security Review Tool!"}
+
+
+@app.get("/history", response_model=list[ScanRecord])
+def get_history():
+    return get_recent_scans(limit=10)
 
 
 @app.post("/scan", response_model=ScanResult)
@@ -136,5 +153,12 @@ def scan_code(input: CodeInput):
     parsed.setdefault("vulnerabilities", [])
     parsed.setdefault("fixed_code", "")
     parsed.setdefault("summary", "")
+
+    save_scan(
+        code_snippet=input.code,
+        vulnerabilities_found=parsed["vulnerabilities"],
+        fixed_code=parsed["fixed_code"],
+        summary=parsed["summary"],
+    )
 
     return ScanResult(**parsed)
