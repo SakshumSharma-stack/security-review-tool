@@ -10,7 +10,9 @@ import json
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Any
 import hashlib
+import openai
 import re
+import traceback
 
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import AzureChatOpenAI
@@ -373,11 +375,15 @@ def scan_code(request: Request, input: CodeInput):
 
     try:
         result = scan_agent.invoke(initial)
+    except openai.BadRequestError:
+        raise HTTPException(status_code=400, detail="Code was flagged by content safety filter")
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"LLM returned invalid JSON: {e}")
     except Exception:
+        import logging
+        logging.exception("Agent error")
         raise HTTPException(status_code=500, detail="Internal server error")
 
     save_scan(
