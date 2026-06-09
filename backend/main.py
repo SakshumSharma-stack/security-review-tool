@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Any
 import hashlib
+import re
 
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import AzureChatOpenAI
@@ -52,6 +53,12 @@ class ScanState(TypedDict):
     language: str
     rules: List[Dict[str, Any]]
     rules_text: str
+    imports: List[str]
+    flagged_comments: List[str]
+    injection_findings: List[Dict[str, Any]]
+    auth_findings: List[Dict[str, Any]]
+    secrets_findings: List[Dict[str, Any]]
+    dependency_findings: List[Dict[str, Any]]
     vulnerabilities: List[Dict[str, Any]]
     fixed_code: str
     summary: str
@@ -59,31 +66,37 @@ class ScanState(TypedDict):
 
 # ── Agent Nodes ──────────────────────────────────────────────────────────────
 
-def load_rules(state: ScanState) -> dict:
-    try:
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        rules = data["rules"]
-    except FileNotFoundError:
-        raise RuntimeError(f"Rules file not found at {RULES_PATH}")
-    except (KeyError, json.JSONDecodeError) as e:
-        raise RuntimeError(f"Failed to parse rules file: {e}")
+_INJECTION_TRIGGERS = {"ignore", "bypass", "override", "previous instructions"}
+_SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
-    lines = []
-    for r in rules:
-        lines.append(
-            f"- [{r['rule_id']}] {r['owasp_category']} | {r['name']} "
-            f"(Severity: {r['severity']})\n"
-            f"  Description: {r['description']}\n"
-            f"  Remediation: {r['remediation_summary']}"
-        )
-    return {"rules": rules, "rules_text": "\n\n".join(lines)}
+_IMPORT_RE = re.compile(
+    r"^\s*(import\s+\S.*|from\s+\S+\s+import\s+.*|require\s*\(.*\)|#include\s+.*|using\s+\S.*|use\s+\S.*)",
+    re.IGNORECASE,
+)
+_COMMENT_RE = re.compile(
+    r'(""".*?"""|\'\'\'.*?\'\'\'|/\*.*?\*/|#[^\n]*|//[^\n]*|--[^\n]*)',
+    re.DOTALL,
+)
 
 
-def analyze_code(state: ScanState) -> dict:
+def _format_rules(rules: List[Dict[str, Any]]) -> str:
+    return "\n\n".join(
+        f"- [{r['rule_id']}] {r['owasp_category']} | {r['name']} "
+        f"(Severity: {r['severity']})\n"
+        f"  Description: {r['description']}\n"
+        f"  Remediation: {r['remediation_summary']}"
+        for r in rules
+    )
+
+
+def _call_llm_for_findings(
+    code: str, language: str, rules: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if not rules:
+        return []
     prompt = f"""You are an expert application security engineer.
 
-Analyze the {state["language"]} code below against the OWASP security rules and return a JSON array of vulnerabilities found.
+Analyze the {language} code below against the OWASP security rules and return a JSON array of vulnerabilities found.
 
 Return ONLY a raw JSON array (no markdown fences, no extra text):
 [
@@ -101,10 +114,10 @@ If no vulnerabilities are found, return an empty array: []
 Only report issues you can concretely identify. Do not invent problems.
 
 ═══════════════════════ OWASP RULES ═══════════════════════
-{state["rules_text"]}
+{_format_rules(rules)}
 
 ═══════════════════════ CODE TO REVIEW ═══════════════════════
-{state["code"]}"""
+{code}"""
 
     response = llm.invoke([
         SystemMessage(content="You are a security code reviewer. Respond with a valid JSON array only."),
@@ -118,7 +131,83 @@ Only report issues you can concretely identify. Do not invent problems.
             raw = raw[5:]
         raw = raw.strip()
 
-    return {"vulnerabilities": json.loads(raw)}
+    return json.loads(raw)
+
+
+def preprocess_input(state: ScanState) -> dict:
+    try:
+        with open(RULES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        rules = data["rules"]
+    except FileNotFoundError:
+        raise RuntimeError(f"Rules file not found at {RULES_PATH}")
+    except (KeyError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"Failed to parse rules file: {e}")
+
+    code = state["code"]
+
+    imports = [
+        line.strip()
+        for line in code.splitlines()
+        if _IMPORT_RE.match(line)
+    ]
+
+    flagged_comments = []
+    for match in _COMMENT_RE.finditer(code):
+        text = match.group().lower()
+        if any(trigger in text for trigger in _INJECTION_TRIGGERS):
+            flagged_comments.append(match.group().strip())
+
+    stripped = _COMMENT_RE.sub("", code)
+    stripped = "\n".join(line for line in stripped.splitlines() if line.strip())
+
+    return {
+        "rules": rules,
+        "imports": imports,
+        "flagged_comments": flagged_comments,
+        "code": stripped,
+    }
+
+
+def injection_analyzer(state: ScanState) -> dict:
+    rules = [r for r in state["rules"] if r["rule_id"].startswith("A03")]
+    return {"injection_findings": _call_llm_for_findings(state["code"], state["language"], rules)}
+
+
+def auth_analyzer(state: ScanState) -> dict:
+    rules = [r for r in state["rules"] if r["rule_id"].startswith(("A01", "A07"))]
+    return {"auth_findings": _call_llm_for_findings(state["code"], state["language"], rules)}
+
+
+def secrets_analyzer(state: ScanState) -> dict:
+    rules = [r for r in state["rules"] if r["rule_id"].startswith("A02")]
+    return {"secrets_findings": _call_llm_for_findings(state["code"], state["language"], rules)}
+
+
+def dependency_analyzer(state: ScanState) -> dict:
+    rules = [r for r in state["rules"] if r["rule_id"].startswith("A09")]
+    import_text = "\n".join(state["imports"]) if state["imports"] else "(no imports detected)"
+    return {"dependency_findings": _call_llm_for_findings(import_text, state["language"], rules)}
+
+
+def synthesizer(state: ScanState) -> dict:
+    all_findings = (
+        state.get("injection_findings", [])
+        + state.get("auth_findings", [])
+        + state.get("secrets_findings", [])
+        + state.get("dependency_findings", [])
+    )
+
+    seen: set = set()
+    unique = []
+    for f in all_findings:
+        key = (f.get("rule_id", ""), f.get("vulnerable_snippet", ""))
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    unique.sort(key=lambda f: _SEVERITY_RANK.get(f.get("severity", "LOW"), 4))
+    return {"vulnerabilities": unique}
 
 
 def generate_fix(state: ScanState) -> dict:
@@ -170,13 +259,21 @@ Be concise. Return only the summary paragraph — no JSON, no headers, no bullet
 
 def _build_scan_agent():
     g = StateGraph(ScanState)
-    g.add_node("load_rules", load_rules)
-    g.add_node("analyze_code", analyze_code)
+    g.add_node("preprocess_input", preprocess_input)
+    g.add_node("injection_analyzer", injection_analyzer)
+    g.add_node("auth_analyzer", auth_analyzer)
+    g.add_node("secrets_analyzer", secrets_analyzer)
+    g.add_node("dependency_analyzer", dependency_analyzer)
+    g.add_node("synthesizer", synthesizer)
     g.add_node("generate_fix", generate_fix)
     g.add_node("explain", explain)
-    g.add_edge(START, "load_rules")
-    g.add_edge("load_rules", "analyze_code")
-    g.add_edge("analyze_code", "generate_fix")
+    g.add_edge(START, "preprocess_input")
+    g.add_edge("preprocess_input", "injection_analyzer")
+    g.add_edge("injection_analyzer", "auth_analyzer")
+    g.add_edge("auth_analyzer", "secrets_analyzer")
+    g.add_edge("secrets_analyzer", "dependency_analyzer")
+    g.add_edge("dependency_analyzer", "synthesizer")
+    g.add_edge("synthesizer", "generate_fix")
     g.add_edge("generate_fix", "explain")
     g.add_edge("explain", END)
     return g.compile()
@@ -263,6 +360,12 @@ def scan_code(request: Request, input: CodeInput):
         "language": input.language.value,
         "rules": [],
         "rules_text": "",
+        "imports": [],
+        "flagged_comments": [],
+        "injection_findings": [],
+        "auth_findings": [],
+        "secrets_findings": [],
+        "dependency_findings": [],
         "vulnerabilities": [],
         "fixed_code": "",
         "summary": "",
