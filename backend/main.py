@@ -1,10 +1,15 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from pydantic import BaseModel, field_validator
+from enum import Enum
 from dotenv import load_dotenv
 import os
 import json
 from pathlib import Path
-from typing import TypedDict, List, Dict, Any
+from typing import Annotated, TypedDict, List, Dict, Any
+import hashlib
 
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import AzureChatOpenAI
@@ -14,7 +19,11 @@ from backend.database import init_db, save_scan, get_recent_scans
 
 load_dotenv()
 
+limiter = Limiter(key_func=lambda request: request.client.host, default_limits=["20/hour"])
+
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 init_db()
 
 RULES_PATH = Path(__file__).parent.parent / "rules" / "owasp_rules.json"
@@ -28,10 +37,19 @@ llm = AzureChatOpenAI(
 )
 
 
+# ── Auth dependency ──────────────────────────────────────────────────────────
+
+def verify_api_key(x_api_key: Annotated[str | None, Header()] = None) -> None:
+    provided_hash = hashlib.sha256(x_api_key.encode()).hexdigest() if x_api_key else None
+    if provided_hash != os.getenv("API_KEY_HASH"):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
 # ── LangGraph State ──────────────────────────────────────────────────────────
 
 class ScanState(TypedDict):
     code: str
+    language: str
     rules: List[Dict[str, Any]]
     rules_text: str
     vulnerabilities: List[Dict[str, Any]]
@@ -65,7 +83,7 @@ def load_rules(state: ScanState) -> dict:
 def analyze_code(state: ScanState) -> dict:
     prompt = f"""You are an expert application security engineer.
 
-Analyze the code below against the OWASP security rules and return a JSON array of vulnerabilities found.
+Analyze the {state["language"]} code below against the OWASP security rules and return a JSON array of vulnerabilities found.
 
 Return ONLY a raw JSON array (no markdown fences, no extra text):
 [
@@ -94,7 +112,6 @@ Only report issues you can concretely identify. Do not invent problems.
     ])
 
     raw = response.content.strip()
-    # Strip markdown fences if the model wraps output despite instructions
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json\n"):
@@ -194,26 +211,56 @@ class ScanRecord(BaseModel):
     summary: str
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+# ── Input models ─────────────────────────────────────────────────────────────
+
+class Language(str, Enum):
+    python = "python"
+    javascript = "javascript"
+    java = "java"
+    typescript = "typescript"
+    go = "go"
+    ruby = "ruby"
+    php = "php"
+    csharp = "csharp"
+    cpp = "cpp"
+    other = "other"
+
 
 class CodeInput(BaseModel):
     code: str
+    language: Language = Language.python
 
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Code cannot be empty")
+        if len(v) > 10000:
+            raise ValueError("Code exceeds maximum allowed size of 10,000 characters")
+        if "\x00" in v:
+            raise ValueError("Code contains invalid characters")
+        return v
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def read_root():
     return {"message": "Hello from Security Review Tool!"}
 
 
-@app.get("/history", response_model=list[ScanRecord])
-def get_history():
+@app.get("/history", response_model=list[ScanRecord], dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/hour")
+def get_history(request: Request):
     return get_recent_scans(limit=10)
 
 
-@app.post("/scan", response_model=ScanResult)
-def scan_code(input: CodeInput):
+@app.post("/scan", response_model=ScanResult, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/hour")
+def scan_code(request: Request, input: CodeInput):
     initial: ScanState = {
         "code": input.code,
+        "language": input.language.value,
         "rules": [],
         "rules_text": "",
         "vulnerabilities": [],
@@ -227,8 +274,8 @@ def scan_code(input: CodeInput):
         raise HTTPException(status_code=500, detail=str(e))
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"LLM returned invalid JSON: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     save_scan(
         code_snippet=input.code,
