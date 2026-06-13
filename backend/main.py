@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
@@ -25,6 +26,15 @@ load_dotenv()
 limiter = Limiter(key_func=lambda request: request.client.host, default_limits=["20/hour"])
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://security-review-sakshum.lemonriver-d0f61589.eastus.azurecontainerapps.io",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 init_db()
