@@ -19,7 +19,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip freeze > requirements.lock
 
       - name: Snyk open-source dependency scan
         uses: snyk/actions/python@master
