@@ -15,6 +15,12 @@ SEVERITY_COLORS = {
     "LOW": "🔵",
 }
 
+CONFIDENCE_BADGES = {
+    "HIGH": "🟢 High confidence",
+    "MEDIUM": "🟡 Medium confidence",
+    "LOW": "🔴 Low confidence",
+}
+
 st.title("Security Review Tool")
 
 language = st.selectbox(
@@ -72,9 +78,13 @@ if st.button("Scan"):
                 icon = SEVERITY_COLORS.get(severity, "⚪")
                 label = f"{icon} [{severity}] {v.get('name', 'Unknown')}  —  {v.get('owasp_category', '')}"
                 with st.expander(label):
+                    confidence = v.get("confidence", "HIGH")
+                    confidence_badge = CONFIDENCE_BADGES.get(confidence, "🟡 Unknown confidence")
                     st.markdown(f"**Rule:** `{v.get('rule_id', '')}`")
-                    st.markdown(f"**Severity:** {severity}")
+                    st.markdown(f"**Severity:** {severity}  |  **Confidence:** {confidence_badge}")
                     st.markdown(f"**OWASP Category:** {v.get('owasp_category', '')}")
+                    if confidence == "LOW":
+                        st.warning("⚠️ Needs human review")
                     st.markdown("**Explanation:**")
                     st.write(v.get("explanation", ""))
                     st.markdown("**Vulnerable Snippet:**")

@@ -64,6 +64,7 @@ class ScanState(TypedDict):
     llm_findings: List[Dict[str, Any]]
     vulnerabilities: List[Dict[str, Any]]
     fixed_code: str
+    checker_warnings: List[str]
     summary: str
 
 
@@ -108,11 +109,13 @@ Return ONLY a raw JSON array (no markdown fences, no extra text):
     "owasp_category": "<full category string>",
     "name": "<vulnerability name>",
     "severity": "<CRITICAL | HIGH | MEDIUM | LOW>",
+    "confidence": "<HIGH | MEDIUM | LOW>",
     "explanation": "<2-4 sentence plain English explanation of the specific issue in this code>",
     "vulnerable_snippet": "<exact lines or expression from the submitted code that are vulnerable>"
   }}
 ]
 
+Set confidence to HIGH when the vulnerability is unambiguous from the code alone, MEDIUM when context outside this snippet is needed to confirm, LOW when it is a heuristic match that requires human review.
 If no vulnerabilities are found, return an empty array: []
 Only report issues you can concretely identify. Do not invent problems.
 
@@ -223,11 +226,13 @@ Return ONLY a raw JSON array (no markdown fences, no extra text):
     "owasp_category": "<full category string from the rule>",
     "name": "<vulnerability name>",
     "severity": "<CRITICAL | HIGH | MEDIUM | LOW>",
+    "confidence": "<HIGH | MEDIUM | LOW>",
     "explanation": "<2-4 sentences describing the specific issue in this code and why it is exploitable>",
     "vulnerable_snippet": "<exact lines or expression from the submitted code that are vulnerable>"
   }}
 ]
 
+Set confidence to HIGH when the vulnerability is unambiguous from the code alone, MEDIUM when context outside this snippet is needed to confirm, LOW when it is a heuristic match that requires human review.
 If none of the four attack surfaces are present, return an empty array: []
 Only report issues you can concretely identify in the code. Do not invent problems.
 
@@ -296,6 +301,58 @@ Return ONLY the fixed code — no explanation, no markdown fences, no commentary
     return {"fixed_code": fixed_code}
 
 
+def checker(state: ScanState) -> dict:
+    vulns = state.get("vulnerabilities", [])
+    if not vulns:
+        return {"checker_warnings": []}
+
+    vuln_list = "\n".join(
+        f"{i+1}. [{v.get('rule_id', '?')}] {v.get('name', '?')} — {v.get('vulnerable_snippet', '')[:120]}"
+        for i, v in enumerate(vulns)
+    )
+
+    prompt = f"""You are a security code reviewer verifying that a set of fixes actually remediate identified vulnerabilities.
+
+Original code:
+{state["code"]}
+
+Vulnerabilities found:
+{vuln_list}
+
+Fixed code:
+{state["fixed_code"]}
+
+For each numbered vulnerability, answer YES if the fixed code addresses it, or NO if it does not or you cannot confirm it.
+Return ONLY a raw JSON array (no markdown fences, no extra text):
+[
+  {{"number": 1, "rule_id": "<rule_id>", "addressed": true, "reason": "<one-line reason>"}}
+]"""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a security code reviewer. Respond with a valid JSON array only."),
+        HumanMessage(content=prompt),
+    ])
+
+    raw = response.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json\n"):
+            raw = raw[5:]
+        raw = raw.strip()
+
+    try:
+        checks = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"checker_warnings": ["⚠️ Could not verify fixes — human review recommended."]}
+
+    warnings = [
+        f"[{c.get('rule_id', '?')}] Not addressed: {c.get('reason', '')}"
+        for c in checks
+        if not c.get("addressed", True)
+    ]
+    return {"checker_warnings": warnings}
+
+
 def explain(state: ScanState) -> dict:
     vuln_count = len(state["vulnerabilities"])
     prompt = f"""You are an expert application security engineer writing for a developer audience.
@@ -313,7 +370,10 @@ Be concise. Return only the summary paragraph — no JSON, no headers, no bullet
         HumanMessage(content=prompt),
     ])
 
-    return {"summary": response.content.strip()}
+    summary = response.content.strip()
+    if state.get("checker_warnings"):
+        summary += "\n\n⚠️ Some fixes may be incomplete - human review recommended."
+    return {"summary": summary}
 
 
 # ── Build LangGraph agent ────────────────────────────────────────────────────
@@ -328,6 +388,7 @@ def _build_scan_agent():
     g.add_node("llm_analyzer", llm_analyzer)
     g.add_node("synthesizer", synthesizer)
     g.add_node("generate_fix", generate_fix)
+    g.add_node("checker", checker)
     g.add_node("explain", explain)
     g.add_edge(START, "preprocess_input")
     g.add_edge("preprocess_input", "injection_analyzer")
@@ -337,7 +398,8 @@ def _build_scan_agent():
     g.add_edge("dependency_analyzer", "llm_analyzer")
     g.add_edge("llm_analyzer", "synthesizer")
     g.add_edge("synthesizer", "generate_fix")
-    g.add_edge("generate_fix", "explain")
+    g.add_edge("generate_fix", "checker")
+    g.add_edge("checker", "explain")
     g.add_edge("explain", END)
     return g.compile()
 
@@ -352,6 +414,7 @@ class VulnerabilityFinding(BaseModel):
     owasp_category: str
     name: str
     severity: str
+    confidence: str = "HIGH"
     explanation: str
     vulnerable_snippet: str
 
@@ -432,6 +495,7 @@ def scan_code(request: Request, input: CodeInput):
         "llm_findings": [],
         "vulnerabilities": [],
         "fixed_code": "",
+        "checker_warnings": [],
         "summary": "",
     }
 
