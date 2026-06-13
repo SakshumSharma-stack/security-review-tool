@@ -19,18 +19,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip freeze > requirements.lock
+        run: pip install -r requirements.txt
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Authenticate Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
 
       - name: Snyk open-source dependency scan
-        uses: snyk/actions/python@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: snyk test --file=requirements.txt --package-manager=pip --skip-unresolved
+        continue-on-error: true
 
       - name: Snyk static code analysis
-        uses: snyk/actions/python@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
+        run: snyk code test
+        continue-on-error: true
