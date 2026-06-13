@@ -247,7 +247,6 @@ Only report issues you can concretely identify in the code. Do not invent proble
 ═══════════════════════ CODE TO REVIEW ═══════════════════════
 {code}"""
 
-    print("LLM ANALYZER INPUT:", code[:500])
     response = llm.invoke([
         SystemMessage(content="You are an LLM application security expert. Respond with a valid JSON array only."),
         HumanMessage(content=prompt),
@@ -509,7 +508,6 @@ def scan_code(request: Request, input: CodeInput):
 
     try:
         result = scan_agent.invoke(initial)
-        print("LLM FINDINGS:", result.get("llm_findings", []))
     except openai.BadRequestError:
         raise HTTPException(status_code=400, detail="Code was flagged by content safety filter")
     except RuntimeError as e:
