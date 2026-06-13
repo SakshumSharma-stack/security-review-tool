@@ -61,6 +61,7 @@ class ScanState(TypedDict):
     auth_findings: List[Dict[str, Any]]
     secrets_findings: List[Dict[str, Any]]
     dependency_findings: List[Dict[str, Any]]
+    llm_findings: List[Dict[str, Any]]
     vulnerabilities: List[Dict[str, Any]]
     fixed_code: str
     summary: str
@@ -192,12 +193,70 @@ def dependency_analyzer(state: ScanState) -> dict:
     return {"dependency_findings": _call_llm_for_findings(import_text, state["language"], rules)}
 
 
+def llm_analyzer(state: ScanState) -> dict:
+    rules = [r for r in state["rules"] if r["rule_id"].startswith("LLM")]
+    if not rules:
+        return {"llm_findings": []}
+
+    code = state["code"]
+    language = state["language"]
+
+    prompt = f"""You are an expert in LLM application security (OWASP LLM Top 10).
+
+Analyze the {language} code below for LLM-specific security vulnerabilities. Focus exclusively on these four attack surfaces:
+
+1. PROMPT INJECTION (LLM01): User-controlled input concatenated or f-string interpolated directly into prompt strings, system messages, or message arrays sent to an LLM API — without sanitization or a structured template boundary separating instructions from data.
+
+2. INSECURE OUTPUT HANDLING (LLM02): LLM response content (.content, .text, .choices[]) rendered into HTML via innerHTML / dangerouslySetInnerHTML / render_template_string, or passed to eval() / exec() / subprocess without sanitization or schema validation first.
+
+3. SENSITIVE INFORMATION DISCLOSURE (LLM06): Secrets (API keys, tokens, passwords), PII (SSN, email, DOB, credit card), or environment variables containing credentials included in the prompt payload sent to an external LLM API call (openai, anthropic, bedrock, gemini, azure openai).
+
+4. INSECURE PLUGIN / TOOL DESIGN (LLM07): LLM-generated tool call arguments passed directly to os.system(), subprocess, cursor.execute(), file operations, or shell commands without allowlist validation, schema enforcement, or sandboxing.
+
+Apply the following rules when reporting findings:
+{_format_rules(rules)}
+
+Return ONLY a raw JSON array (no markdown fences, no extra text):
+[
+  {{
+    "rule_id": "<LLM01-001 | LLM02-001 | LLM06-001 | LLM07-001 | LLM08-001 | LLM09-001>",
+    "owasp_category": "<full category string from the rule>",
+    "name": "<vulnerability name>",
+    "severity": "<CRITICAL | HIGH | MEDIUM | LOW>",
+    "explanation": "<2-4 sentences describing the specific issue in this code and why it is exploitable>",
+    "vulnerable_snippet": "<exact lines or expression from the submitted code that are vulnerable>"
+  }}
+]
+
+If none of the four attack surfaces are present, return an empty array: []
+Only report issues you can concretely identify in the code. Do not invent problems.
+
+═══════════════════════ CODE TO REVIEW ═══════════════════════
+{code}"""
+
+    print("LLM ANALYZER INPUT:", code[:500])
+    response = llm.invoke([
+        SystemMessage(content="You are an LLM application security expert. Respond with a valid JSON array only."),
+        HumanMessage(content=prompt),
+    ])
+
+    raw = response.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json\n"):
+            raw = raw[5:]
+        raw = raw.strip()
+
+    return {"llm_findings": json.loads(raw)}
+
+
 def synthesizer(state: ScanState) -> dict:
     all_findings = (
         state.get("injection_findings", [])
         + state.get("auth_findings", [])
         + state.get("secrets_findings", [])
         + state.get("dependency_findings", [])
+        + state.get("llm_findings", [])
     )
 
     seen: set = set()
@@ -266,6 +325,7 @@ def _build_scan_agent():
     g.add_node("auth_analyzer", auth_analyzer)
     g.add_node("secrets_analyzer", secrets_analyzer)
     g.add_node("dependency_analyzer", dependency_analyzer)
+    g.add_node("llm_analyzer", llm_analyzer)
     g.add_node("synthesizer", synthesizer)
     g.add_node("generate_fix", generate_fix)
     g.add_node("explain", explain)
@@ -274,7 +334,8 @@ def _build_scan_agent():
     g.add_edge("injection_analyzer", "auth_analyzer")
     g.add_edge("auth_analyzer", "secrets_analyzer")
     g.add_edge("secrets_analyzer", "dependency_analyzer")
-    g.add_edge("dependency_analyzer", "synthesizer")
+    g.add_edge("dependency_analyzer", "llm_analyzer")
+    g.add_edge("llm_analyzer", "synthesizer")
     g.add_edge("synthesizer", "generate_fix")
     g.add_edge("generate_fix", "explain")
     g.add_edge("explain", END)
@@ -368,6 +429,7 @@ def scan_code(request: Request, input: CodeInput):
         "auth_findings": [],
         "secrets_findings": [],
         "dependency_findings": [],
+        "llm_findings": [],
         "vulnerabilities": [],
         "fixed_code": "",
         "summary": "",
@@ -375,6 +437,7 @@ def scan_code(request: Request, input: CodeInput):
 
     try:
         result = scan_agent.invoke(initial)
+        print("LLM FINDINGS:", result.get("llm_findings", []))
     except openai.BadRequestError:
         raise HTTPException(status_code=400, detail="Code was flagged by content safety filter")
     except RuntimeError as e:

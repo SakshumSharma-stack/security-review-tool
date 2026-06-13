@@ -268,6 +268,100 @@
       ],
       "severity": "MEDIUM",
       "remediation_summary": "Write an immutable audit log entry for every privileged operation recording: who performed it, what action was taken, on which resource, and when. Consider append-only storage for audit logs. Integrate with your SIEM and create alerts for unexpected privilege escalations."
+    },
+    {
+      "rule_id": "LLM01-001",
+      "owasp_category": "LLM01:2025 - Prompt Injection",
+      "name": "Prompt Injection via Unsanitized User Input",
+      "description": "User-controlled input concatenated directly into LLM prompt strings allows an attacker to override system instructions, exfiltrate context, or hijack the model's behaviour. Both direct injection (user crafting the payload) and indirect injection (malicious content retrieved from external sources) are in scope.",
+      "code_patterns": [
+        "f['\"].*{.*user_input.*}.*['\"].*(?:openai|anthropic|llm|chat|completion|prompt)",
+        "prompt\\s*=\\s*.*\\+.*(?:request\\.|user_input|user_message|query)",
+        "messages.*content.*f['\"].*{(?:user|input|query|message)",
+        "system_prompt.*\\+.*request\\.(?:args|form|json|GET|POST)",
+        "HumanMessage\\(.*\\+.*(?:user|input|query)",
+        "ChatPromptTemplate.*from_template.*\\{(?!.*input_variables)"
+      ],
+      "severity": "CRITICAL",
+      "remediation_summary": "Never concatenate raw user input into prompt strings. Use a templating layer that clearly separates system instructions from user data (e.g., LangChain's ChatPromptTemplate with typed input variables). Apply an LLM-aware input filter to detect and strip injection attempts. Treat LLM output as untrusted; do not allow the model to override privilege levels or tool permissions based on content within the user turn."
+    },
+    {
+      "rule_id": "LLM02-001",
+      "owasp_category": "LLM02:2025 - Insecure Output Handling",
+      "name": "Unsanitized LLM Output Rendered as HTML or Executed as Code",
+      "description": "LLM-generated text rendered directly into HTML or passed to eval/exec without sanitization enables stored XSS, code injection, or indirect prompt injection attacks. Attackers can craft upstream content that causes the model to emit malicious payloads.",
+      "code_patterns": [
+        "innerHTML\\s*=.*(?:llm|gpt|claude|gemini|completion|response)\\.(?:content|text|output|choices)",
+        "dangerouslySetInnerHTML.*(?:llm|ai|model|completion|response)",
+        "eval\\(.*(?:llm|gpt|claude|completion|response)\\.(?:content|text|output)",
+        "exec\\(.*(?:llm|gpt|claude|completion|response)\\.(?:content|text|output)",
+        "render_template_string\\(.*(?:llm|ai|response|completion)",
+        "Markup\\(.*(?:llm|ai|response|completion|model_output)"
+      ],
+      "severity": "HIGH",
+      "remediation_summary": "Treat all LLM output as untrusted user input. Escape or sanitize content before inserting into HTML (use DOMPurify, bleach, or framework auto-escaping). Never pass LLM output to eval(), exec(), or subprocess calls. If structured data is needed, instruct the model to respond in JSON and parse with a strict schema validator rather than evaluating free-form text."
+    },
+    {
+      "rule_id": "LLM06-001",
+      "owasp_category": "LLM06:2025 - Sensitive Information Disclosure",
+      "name": "PII or Secrets Transmitted to External LLM API",
+      "description": "Sending personally identifiable information, credentials, API keys, or other sensitive data to third-party LLM APIs risks data retention by the provider, regulatory violations (GDPR, HIPAA), and credential exposure if the API call is logged or intercepted.",
+      "code_patterns": [
+        "(?i)(?:password|passwd|secret|api_key|token|ssn|credit_card|dob|date_of_birth).*(?:openai|anthropic|azure.*openai|bedrock|gemini)\\.(?:chat|complete|invoke)",
+        "client\\.(?:chat\\.completions\\.create|messages\\.create)\\(.*(?:password|secret|token|ssn|pii)",
+        "f['\"].*{(?:password|secret|api_key|token|ssn|credit_card).*}.*(?:openai|anthropic|llm)",
+        "messages.*content.*(?:password|private_key|secret_key|bearer|ssn)",
+        "prompt.*=.*(?:os\\.environ|getenv).*(?:openai|anthropic|llm)"
+      ],
+      "severity": "HIGH",
+      "remediation_summary": "Scrub or redact PII and secrets before constructing LLM prompts using a data-loss prevention (DLP) library (e.g., presidio, scrubadub). Use self-hosted or private deployment options when processing regulated data. Review the LLM provider's data retention and training policies. Log what categories of data are sent, not the raw values, for audit purposes."
+    },
+    {
+      "rule_id": "LLM07-001",
+      "owasp_category": "LLM07:2025 - Insecure Plugin Design",
+      "name": "LLM Tool/Function Call Executes System Commands or Queries Without Validation",
+      "description": "LLM-controlled tool calls that pass model-generated arguments directly to OS commands, SQL queries, or file operations without validation or sandboxing allow prompt injection to escalate into full system compromise.",
+      "code_patterns": [
+        "def.*tool.*:\\s*\\n.*(?:os\\.system|subprocess\\.run|subprocess\\.call)\\(.*(?:args|input|query|command)",
+        "@tool\\b[\\s\\S]{0,200}(?:os\\.system|subprocess|execute|eval)\\(",
+        "function_call.*arguments.*(?:os\\.system|exec|eval|cursor\\.execute)",
+        "tool_calls.*function.*(?:shell|execute|run_command|query_db)(?!.*validate|.*sanitize|.*allowlist)",
+        "langchain.*Tool.*func.*(?:os\\.system|subprocess|shell)",
+        "openai.*function.*parameters.*(?:command|query|shell|sql)(?!.*enum|.*pattern)"
+      ],
+      "severity": "CRITICAL",
+      "remediation_summary": "Validate all LLM-generated tool arguments against a strict schema or allowlist before execution. Use a sandboxed execution environment (container, subprocess with dropped privileges) for any code or command execution tools. Implement a confirmation step for destructive or irreversible tool calls. Prefer narrow, purpose-built tools over generic shell or SQL execution tools exposed to the model."
+    },
+    {
+      "rule_id": "LLM08-001",
+      "owasp_category": "LLM08:2025 - Excessive Agency",
+      "name": "LLM Agent Performs Irreversible Actions Without Human Confirmation",
+      "description": "Granting an LLM agent autonomous ability to send emails, delete files, make purchases, or modify production data without a human-in-the-loop confirmation step allows a single compromised or hallucinated action to cause irreversible damage.",
+      "code_patterns": [
+        "agent.*(?:send_email|delete_file|rm\\s|purchase|charge|transfer_funds)(?!.*confirm|.*approval|.*human_review)",
+        "AgentExecutor.*(?:send_email|delete|purchase|payment)(?!.*verbose.*True|.*human)",
+        "tools.*(?:send_email|file_delete|make_payment|db\\.drop|s3.*delete)(?!.*require_confirmation)",
+        "auto_approve\\s*=\\s*True",
+        "human_in_the_loop\\s*=\\s*False",
+        "(?:email|smtp)\\.send\\((?!.*confirm|.*approval)"
+      ],
+      "severity": "HIGH",
+      "remediation_summary": "Apply the principle of least privilege: grant agents only the minimum tool set needed. Require explicit human confirmation before irreversible or high-impact actions (email sends, file deletions, financial transactions). Implement a dry-run or preview mode. Set per-session budget and action-count limits. Log every tool invocation with its arguments for post-incident audit."
+    },
+    {
+      "rule_id": "LLM09-001",
+      "owasp_category": "LLM09:2025 - Misinformation",
+      "name": "LLM Output Used Directly for Security Decisions Without Validation",
+      "description": "Using unvalidated LLM-generated output to make access control decisions, determine vulnerability severity, or drive automated security responses introduces hallucination risk. A confident but incorrect model output could block legitimate users or allow malicious actions.",
+      "code_patterns": [
+        "if.*(?:llm|gpt|claude|gemini|model)\\.(?:content|text|output).*(?:is_safe|is_malicious|allow|deny|grant|revoke)",
+        "(?:access_granted|is_authorized|is_admin)\\s*=.*(?:llm|ai|model|completion)\\.(?:content|text)",
+        "json\\.loads\\(.*(?:llm|model|completion)\\.(?:content|text)\\).*(?:allow|deny|role|permission)",
+        "severity\\s*=.*(?:llm|model|ai)\\.(?:content|text|output)(?!.*validate|.*schema|.*enum)",
+        "security_decision.*=.*(?:chat_completion|llm_response|model_output)(?!.*human_review|.*validate)"
+      ],
+      "severity": "MEDIUM",
+      "remediation_summary": "Never use raw LLM output as the sole input to a security-sensitive decision. Require LLM responses to conform to a structured schema with constrained enumerations (e.g., severity must be one of LOW/MEDIUM/HIGH/CRITICAL). Add a deterministic validation layer on top of model output. For high-stakes decisions, require a human review step or a second independent verification pass. Monitor for anomalous model outputs that deviate from expected distributions."
     }
   ]
 }
