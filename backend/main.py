@@ -28,10 +28,8 @@ limiter = Limiter(key_func=lambda request: request.client.host, default_limits=[
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://security-review-sakshum.lemonriver-d0f61589.eastus.azurecontainerapps.io",
-    ],
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
