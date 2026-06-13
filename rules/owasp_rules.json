@@ -143,11 +143,13 @@
       "rule_id": "A05-001",
       "owasp_category": "A05:2021 - Security Misconfiguration",
       "name": "Debug Mode Enabled in Production",
-      "description": "Running a web framework with debug mode active exposes interactive error pages, stack traces, and sometimes a remote code execution console to anyone who can trigger an error.",
+      "description": "Running a web framework with debug mode active exposes interactive error pages, stack traces, and sometimes a remote code execution console to anyone who can trigger an error. In Flask applications, app.debug = True or app.run(debug=True) activates the Werkzeug interactive debugger, which allows arbitrary Python execution. In FastAPI applications, setting DEBUG=True in the environment exposes detailed error responses. Both frameworks should have debug mode disabled and controlled exclusively via environment variables.",
       "code_patterns": [
         "DEBUG\\s*=\\s*True",
         "app\\.run\\(.*debug=True",
         "app\\.debug\\s*=\\s*True",
+        "debug=True",
+        "app\\.run\\(.*debug",
         "ENV\\s*=\\s*['\"]development['\"]",
         "NODE_ENV\\s*=\\s*['\"]development['\"](?!.*process\\.env)"
       ],
@@ -244,13 +246,19 @@
       "rule_id": "A09-002",
       "owasp_category": "A09:2021 - Security Logging and Monitoring Failures",
       "name": "Sensitive Data in Log Output",
-      "description": "Logging passwords, tokens, credit card numbers, or other PII creates a secondary exposure vector. Log aggregation systems often have weaker access controls than the primary datastore.",
+      "description": "Logging passwords, tokens, credit card numbers, CVVs, or other PII creates a secondary exposure vector. Log aggregation systems often have weaker access controls than the primary datastore. In Flask and FastAPI applications this commonly occurs when request bodies, payment details, or authentication credentials are passed directly to logger.info(), logger.debug(), logging.warning(), or print() calls — particularly when using f-strings that interpolate sensitive variables into the log message.",
       "code_patterns": [
         "log(?:ger)?\\.(?:info|debug|warning|error)\\(.*password",
         "log(?:ger)?\\.(?:info|debug|warning|error)\\(.*token",
         "print\\(.*password|print\\(.*secret|print\\(.*api_key",
         "console\\.log\\(.*password|console\\.log\\(.*token",
-        "logger\\.debug\\(.*request\\.(?:form|json|body)"
+        "logger\\.debug\\(.*request\\.(?:form|json|body)",
+        "logger\\.\\w+\\(.*card",
+        "logger\\.\\w+\\(.*password",
+        "log\\(.*token",
+        "print\\(.*card_number",
+        "logging\\.\\w+\\(.*cvv",
+        "logger\\.info\\(.*f\""
       ],
       "severity": "HIGH",
       "remediation_summary": "Scrub or mask sensitive fields before logging. Use a log sanitisation library or a custom filter that redacts fields matching known-sensitive keys (password, token, ssn, card). Never log full request bodies at INFO or higher in production. Apply structured logging so fields can be filtered programmatically."
